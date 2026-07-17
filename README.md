@@ -20,6 +20,29 @@ Champion and profile-icon images come from Riot's Data Dragon CDN.
 
 ## Quick start
 
+### macOS (Homebrew Python)
+
+Homebrew-managed Python is [externally managed](https://peps.python.org/pep-0668/),
+so `pip install` outside a virtual environment fails with an
+`externally-managed-environment` error. Use a venv:
+
+```bash
+brew install python         # if you don't have it yet
+
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+
+cp .env.example .env        # then edit .env
+export $(grep -v '^#' .env | xargs)
+
+python app.py               # http://localhost:5000
+```
+
+On later runs you only need `source .venv/bin/activate` before `python app.py`.
+
+### Linux / other
+
 ```bash
 pip install -r requirements.txt
 
@@ -28,6 +51,9 @@ export $(grep -v '^#' .env | xargs)
 
 python app.py               # http://localhost:5000
 ```
+
+(A virtual environment as shown above works everywhere and is recommended on
+any distro whose system Python is also externally managed, e.g. Debian/Ubuntu.)
 
 No `RIOT_API_KEY`? The app runs in **demo mode** with sample data so you can
 try the UI right away.
