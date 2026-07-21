@@ -26,7 +26,7 @@ themeToggle.addEventListener("click", () => {
 /* ---------------- Background music ----------------
  * Source priority:
  *   1. /static/audio/summoners-rift.mp3  (drop the official theme here)
- *   2. MUSIC_URL from server config       (any streamable audio URL)
+ *   2. MUSIC_URL from server config       (direct audio URL or YouTube link)
  *   3. bundled ambient loop               (always available)
  * Autoplay with sound is blocked by most browsers until the user interacts
  * with the page, so we try immediately and retry on the first interaction —
@@ -35,23 +35,15 @@ themeToggle.addEventListener("click", () => {
 const music = document.getElementById("bg-music");
 music.volume = 0.35;
 
+const INTERACTION_EVENTS = ["pointerdown", "keydown", "touchstart"];
+
 function tryPlayMusic() {
   music.play().then(() => {
-    ["pointerdown", "keydown", "touchstart"].forEach((ev) =>
-      document.removeEventListener(ev, tryPlayMusic)
-    );
+    INTERACTION_EVENTS.forEach((ev) => document.removeEventListener(ev, tryPlayMusic));
   }).catch(() => { /* still blocked; a later interaction will retry */ });
 }
 
-async function initMusic(configMusicUrl) {
-  const sources = [];
-  try {
-    const head = await fetch("/static/audio/summoners-rift.mp3", { method: "HEAD" });
-    if (head.ok) sources.push("/static/audio/summoners-rift.mp3");
-  } catch (_) { /* not provided */ }
-  if (configMusicUrl) sources.push(configMusicUrl);
-  sources.push("/static/audio/rift-ambience.wav");
-
+function startAudioChain(sources) {
   let idx = 0;
   const loadNext = () => {
     if (idx >= sources.length) return;
@@ -59,10 +51,82 @@ async function initMusic(configMusicUrl) {
     tryPlayMusic();
   };
   music.addEventListener("error", loadNext);
-  ["pointerdown", "keydown", "touchstart"].forEach((ev) =>
-    document.addEventListener(ev, tryPlayMusic)
-  );
+  INTERACTION_EVENTS.forEach((ev) => document.addEventListener(ev, tryPlayMusic));
   loadNext();
+}
+
+/* Extract the video id from watch/shorts/embed/youtu.be style links */
+function youtubeId(url) {
+  const m = String(url).match(
+    /(?:youtube\.com\/(?:watch\?(?:.*&)?v=|shorts\/|embed\/|live\/)|youtu\.be\/)([\w-]{11})/);
+  return m ? m[1] : null;
+}
+
+/* A YouTube page URL is not a media stream, so <audio> can't play it.
+ * Instead we loop the video in a hidden 1×1 YouTube IFrame player. If the
+ * API fails to load or the video forbids embedding, fall back to the
+ * bundled ambient loop. */
+function initYouTubeMusic(videoId) {
+  const holder = document.createElement("div");
+  holder.style.cssText = "position:fixed;left:-9999px;top:0;width:1px;height:1px;overflow:hidden;";
+  const target = document.createElement("div");
+  holder.appendChild(target);
+  document.body.appendChild(holder);
+
+  let failed = false;
+  const fallback = () => {
+    if (failed) return;
+    failed = true;
+    holder.remove();
+    startAudioChain(["/static/audio/rift-ambience.wav"]);
+  };
+
+  window.onYouTubeIframeAPIReady = () => {
+    const player = new YT.Player(target, {
+      width: 1,
+      height: 1,
+      videoId,
+      playerVars: { autoplay: 1, loop: 1, playlist: videoId, controls: 0, disablekb: 1, playsinline: 1 },
+      events: {
+        onReady: (e) => {
+          e.target.setVolume(35);
+          e.target.playVideo();
+          // If autoplay was blocked, kick playback on the first interaction.
+          const kick = () => {
+            if (player.getPlayerState() === YT.PlayerState.PLAYING) {
+              INTERACTION_EVENTS.forEach((ev) => document.removeEventListener(ev, kick));
+            } else {
+              player.playVideo();
+            }
+          };
+          INTERACTION_EVENTS.forEach((ev) => document.addEventListener(ev, kick));
+        },
+        onError: fallback,
+      },
+    });
+  };
+
+  const tag = document.createElement("script");
+  tag.src = "https://www.youtube.com/iframe_api";
+  tag.onerror = fallback;
+  document.head.appendChild(tag);
+}
+
+async function initMusic(configMusicUrl) {
+  let localTrack = false;
+  try {
+    const head = await fetch("/static/audio/summoners-rift.mp3", { method: "HEAD" });
+    localTrack = head.ok;
+  } catch (_) { /* not provided */ }
+
+  const ytId = !localTrack && configMusicUrl ? youtubeId(configMusicUrl) : null;
+  if (ytId) return initYouTubeMusic(ytId);
+
+  const sources = [];
+  if (localTrack) sources.push("/static/audio/summoners-rift.mp3");
+  if (configMusicUrl && !youtubeId(configMusicUrl)) sources.push(configMusicUrl);
+  sources.push("/static/audio/rift-ambience.wav");
+  startAudioChain(sources);
 }
 
 /* ---------------- Data loading ---------------- */

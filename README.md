@@ -55,6 +55,13 @@ python app.py               # http://localhost:5000
 (A virtual environment as shown above works everywhere and is recommended on
 any distro whose system Python is also externally managed, e.g. Debian/Ubuntu.)
 
+### VS Code
+
+The repo ships debug configuration in `.vscode/`. Create the venv and install
+requirements as above, let VS Code pick up `./.venv` as the interpreter (or
+select it via **Python: Select Interpreter**), then press **F5** — the
+"Run Rift Recap" launch config starts the server with your `.env` applied.
+
 No `RIOT_API_KEY`? The app runs in **demo mode** with sample data so you can
 try the UI right away.
 
@@ -74,7 +81,11 @@ The player picks the first available source, in this order:
 
 1. `static/audio/summoners-rift.mp3` — drop the official Summoner's Rift
    theme (or any track you like) here; the file is gitignored.
-2. `MUSIC_URL` — any streamable audio URL.
+2. `MUSIC_URL` — a direct audio URL (mp3/ogg/wav), **or a YouTube link**
+   (`youtube.com/watch?v=…`, `youtu.be/…`, shorts/embed links). YouTube
+   links play through a hidden looping YouTube IFrame player, since the
+   browser's `<audio>` element can't stream a YouTube page. If the video
+   owner has disabled embedding, the app falls back to the ambient loop.
 3. `static/audio/rift-ambience.wav` — a bundled royalty-free ambient loop, so
    music always works out of the box.
 
