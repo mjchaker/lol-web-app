@@ -1,7 +1,8 @@
 """Summoner Rift Recap — a small Flask app that shows recent League of Legends
 match history for a configured summoner, powered by the Riot Games API.
 
-Configuration (environment variables, see .env.example):
+Configuration (environment variables, see .env.example; a `.env` file next to
+this script is loaded automatically):
     RIOT_API_KEY   Riot developer API key. Without it the app runs in demo mode.
     RIOT_ID        Riot ID of the summoner, e.g. "Faker#KR1".
     RIOT_PLATFORM  Platform routing value, e.g. euw1, na1, kr (default: euw1).
@@ -10,16 +11,59 @@ Configuration (environment variables, see .env.example):
 """
 import os
 import time
+from urllib.parse import quote
 
 import requests
 from flask import Flask, jsonify, render_template
 
 app = Flask(__name__)
 
+MAX_MATCH_COUNT = 20
+DEFAULT_MATCH_COUNT = 10
+
+
+def load_dotenv(path):
+    """Load KEY=VALUE pairs from a .env file into os.environ.
+
+    Values already present in the environment win, so `.env` acts as a set of
+    defaults. Blank lines and `#` comments are ignored; a leading `export ` and
+    surrounding single/double quotes are stripped. Unlike `export $(cat .env)`
+    this keeps values containing spaces (e.g. "Hide on bush#KR1") intact.
+    """
+    try:
+        with open(path, encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+    except OSError:
+        return
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].lstrip()
+        key, _, value = line.partition("=")
+        key, value = key.strip(), value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+
+
+def parse_match_count(raw):
+    try:
+        count = int(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_MATCH_COUNT
+    return max(1, min(count, MAX_MATCH_COUNT))
+
+
 RIOT_API_KEY = os.environ.get("RIOT_API_KEY", "").strip()
-RIOT_ID = os.environ.get("RIOT_ID", "Summoner#EUW").strip()
-RIOT_PLATFORM = os.environ.get("RIOT_PLATFORM", "euw1").strip().lower()
-MATCH_COUNT = min(int(os.environ.get("MATCH_COUNT", "10")), 20)
+RIOT_ID = os.environ.get("RIOT_ID", "").strip() or "Summoner#EUW"
+RIOT_PLATFORM = os.environ.get("RIOT_PLATFORM", "").strip().lower() or "euw1"
+MATCH_COUNT = parse_match_count(os.environ.get("MATCH_COUNT", ""))
 MUSIC_URL = os.environ.get("MUSIC_URL", "").strip()
 
 DEMO_MODE = not RIOT_API_KEY
@@ -54,6 +98,8 @@ QUEUE_MODES = {
 # match-v5 champion names that differ from Data Dragon image keys
 CHAMPION_KEY_FIXES = {"FiddleSticks": "Fiddlesticks"}
 
+DDRAGON_FALLBACK_VERSION = "15.13.1"
+
 _cache: dict = {}
 
 
@@ -76,19 +122,31 @@ def riot_get(url):
 
 def ddragon_version():
     def fetch():
-        try:
-            return requests.get(
-                "https://ddragon.leagueoflegends.com/api/versions.json", timeout=10
-            ).json()[0]
-        except Exception:
-            return "15.13.1"  # reasonable fallback if the CDN is unreachable
-    return cached("ddragon_version", 6 * 3600, fetch)
+        resp = requests.get(
+            "https://ddragon.leagueoflegends.com/api/versions.json", timeout=10)
+        resp.raise_for_status()
+        return resp.json()[0]
+    try:
+        return cached("ddragon_version", 6 * 3600, fetch)
+    except Exception:
+        # CDN unreachable: use a known version but don't cache it, so the next
+        # request tries again instead of serving stale art for six hours.
+        return DDRAGON_FALLBACK_VERSION
+
+
+def split_riot_id(riot_id):
+    game_name, _, tag_line = riot_id.partition("#")
+    return game_name.strip(), tag_line.strip()
 
 
 def get_account():
-    game_name, _, tag_line = RIOT_ID.partition("#")
+    game_name, tag_line = split_riot_id(RIOT_ID)
+    if not game_name or not tag_line:
+        raise ValueError(
+            f'RIOT_ID must look like "GameName#TagLine" (got "{RIOT_ID}").')
+    # Riot IDs may contain spaces and non-ASCII characters: percent-encode them.
     url = (f"https://{REGION}.api.riotgames.com/riot/account/v1/accounts/"
-           f"by-riot-id/{game_name}/{tag_line}")
+           f"by-riot-id/{quote(game_name, safe='')}/{quote(tag_line, safe='')}")
     return cached("account", 3600, lambda: riot_get(url))
 
 
@@ -100,6 +158,15 @@ def get_summoner(puuid):
 
 def champion_key(name):
     return CHAMPION_KEY_FIXES.get(name, name)
+
+
+def game_duration_seconds(info):
+    """match-v5 quirk: before patch 11.20 `gameDuration` was in milliseconds.
+    Riot's guidance is to treat it as ms when `gameEndTimestamp` is absent."""
+    duration = info.get("gameDuration", 0)
+    if "gameEndTimestamp" not in info:
+        duration //= 1000
+    return duration
 
 
 def summarize_match(match, puuid):
@@ -115,7 +182,7 @@ def summarize_match(match, puuid):
         "champion": champion_key(me["championName"]),
         "championLevel": me["champLevel"],
         "win": me["win"],
-        "durationSec": info["gameDuration"],
+        "durationSec": game_duration_seconds(info),
         "mode": QUEUE_MODES.get(info.get("queueId"), info.get("gameMode", "Unknown").title()),
         "kills": me["kills"],
         "deaths": deaths,
@@ -149,9 +216,10 @@ def fetch_matches(puuid):
 # ---------------------------------------------------------------------------
 
 def demo_profile():
+    game_name, tag_line = split_riot_id(RIOT_ID)
     return {
-        "gameName": RIOT_ID.partition("#")[0],
-        "tagLine": RIOT_ID.partition("#")[2] or "DEMO",
+        "gameName": game_name or "Summoner",
+        "tagLine": tag_line or "DEMO",
         "level": 214,
         "profileIconId": 4658,
         "demo": True,
@@ -162,7 +230,7 @@ def demo_matches():
     import random
     rng = random.Random(42)
     champs = ["Ahri", "Yasuo", "Jinx", "Thresh", "LeeSin", "Lux",
-              "Ezreal", "KaiSa", "Garen", "Viego"]
+              "Ezreal", "Kaisa", "Garen", "Viego"]
     modes = ["Ranked Solo/Duo", "Ranked Flex", "Normal Draft", "ARAM"]
     now = int(time.time() * 1000)
     matches = []
@@ -192,6 +260,38 @@ def demo_matches():
 # Routes
 # ---------------------------------------------------------------------------
 
+RIOT_ERROR_HINTS = {
+    400: "the Riot API rejected the request (is RIOT_ID in the form GameName#TagLine?)",
+    401: "the Riot API key is missing or malformed",
+    403: "the Riot API key is invalid or has expired (development keys last 24 h)",
+    404: "no summoner found for that Riot ID on this platform",
+    429: "Riot API rate limit reached, please try again in a moment",
+    503: "the Riot API is temporarily unavailable",
+}
+
+
+def riot_error_response(status):
+    hint = RIOT_ERROR_HINTS.get(status, "unexpected response from the Riot API")
+    return jsonify({"error": f"Riot API error {status}: {hint}"}), 502
+
+
+def riot_call(fn):
+    """Run `fn` and turn any failure into a JSON error response, so the
+    frontend always receives JSON rather than an HTML 500 page."""
+    try:
+        return jsonify(fn())
+    except requests.HTTPError as e:
+        status = e.response.status_code if e.response is not None else 0
+        return riot_error_response(status)
+    except requests.RequestException as e:
+        return jsonify({"error": f"Could not reach the Riot API: {e}"}), 502
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 500
+    except Exception as e:  # unexpected payload shape etc.
+        app.logger.exception("Unhandled error while building the response")
+        return jsonify({"error": f"Unexpected error: {type(e).__name__}"}), 500
+
+
 @app.route("/")
 def index():
     return render_template("index.html")
@@ -210,33 +310,29 @@ def api_config():
 def api_profile():
     if DEMO_MODE:
         return jsonify(demo_profile())
-    try:
+
+    def build():
         account = get_account()
         summoner = get_summoner(account["puuid"])
-        return jsonify({
+        return {
             "gameName": account["gameName"],
             "tagLine": account["tagLine"],
             "level": summoner["summonerLevel"],
             "profileIconId": summoner["profileIconId"],
             "demo": False,
-        })
-    except requests.HTTPError as e:
-        return jsonify({"error": f"Riot API error: {e.response.status_code}"}), 502
-    except requests.RequestException as e:
-        return jsonify({"error": f"Could not reach the Riot API: {e}"}), 502
+        }
+    return riot_call(build)
 
 
 @app.route("/api/matches")
 def api_matches():
     if DEMO_MODE:
         return jsonify(demo_matches())
-    try:
+
+    def build():
         account = get_account()
-        return jsonify(cached("matches", 120, lambda: fetch_matches(account["puuid"])))
-    except requests.HTTPError as e:
-        return jsonify({"error": f"Riot API error: {e.response.status_code}"}), 502
-    except requests.RequestException as e:
-        return jsonify({"error": f"Could not reach the Riot API: {e}"}), 502
+        return cached("matches", 120, lambda: fetch_matches(account["puuid"]))
+    return riot_call(build)
 
 
 if __name__ == "__main__":

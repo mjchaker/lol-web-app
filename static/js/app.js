@@ -7,15 +7,23 @@ const state = { ddragonVersion: "15.13.1" };
 
 const themeToggle = document.getElementById("theme-toggle");
 
+const THEME_KEY = "riftrecap-theme";
+
+function readSavedTheme() {
+  try { return localStorage.getItem(THEME_KEY); } catch (_) { return null; }
+}
+
 function applyTheme(theme) {
   document.documentElement.dataset.theme = theme;
-  localStorage.setItem("riftrecap-theme", theme);
+  try { localStorage.setItem(THEME_KEY, theme); } catch (_) { /* storage unavailable */ }
 }
 
 (function initTheme() {
-  const saved = localStorage.getItem("riftrecap-theme");
+  // The inline script in <head> already set data-theme to avoid a flash;
+  // re-derive here in case it was skipped, and persist the choice.
+  const saved = readSavedTheme();
   const prefersLight = window.matchMedia("(prefers-color-scheme: light)").matches;
-  applyTheme(saved || (prefersLight ? "light" : "dark"));
+  applyTheme(saved === "light" || saved === "dark" ? saved : (prefersLight ? "light" : "dark"));
 })();
 
 themeToggle.addEventListener("click", () => {
@@ -74,6 +82,7 @@ function initYouTubeMusic(videoId) {
   document.body.appendChild(holder);
 
   let failed = false;
+  let ready = false;
   const fallback = () => {
     if (failed) return;
     failed = true;
@@ -81,7 +90,12 @@ function initYouTubeMusic(videoId) {
     startAudioChain(["/static/audio/rift-ambience.wav"]);
   };
 
+  // The script may load yet never initialise (blocked iframe, privacy
+  // extensions, offline CDN) — in that case onError never fires either.
+  const readyTimer = setTimeout(() => { if (!ready) fallback(); }, 15000);
+
   window.onYouTubeIframeAPIReady = () => {
+    if (failed) return;
     const player = new YT.Player(target, {
       width: 1,
       height: 1,
@@ -89,6 +103,8 @@ function initYouTubeMusic(videoId) {
       playerVars: { autoplay: 1, loop: 1, playlist: videoId, controls: 0, disablekb: 1, playsinline: 1 },
       events: {
         onReady: (e) => {
+          ready = true;
+          clearTimeout(readyTimer);
           e.target.setVolume(35);
           e.target.playVideo();
           // If autoplay was blocked, kick playback on the first interaction.
@@ -101,14 +117,14 @@ function initYouTubeMusic(videoId) {
           };
           INTERACTION_EVENTS.forEach((ev) => document.addEventListener(ev, kick));
         },
-        onError: fallback,
+        onError: () => { clearTimeout(readyTimer); fallback(); },
       },
     });
   };
 
   const tag = document.createElement("script");
   tag.src = "https://www.youtube.com/iframe_api";
-  tag.onerror = fallback;
+  tag.onerror = () => { clearTimeout(readyTimer); fallback(); };
   document.head.appendChild(tag);
 }
 
@@ -141,9 +157,11 @@ function fmtDuration(sec) {
 
 function fmtWhen(ts) {
   if (!ts) return "—";
-  const diff = Date.now() - ts;
-  const hours = Math.floor(diff / 36e5);
-  if (hours < 1) return "just now";
+  const diff = Math.max(0, Date.now() - ts);
+  const minutes = Math.floor(diff / 6e4);
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
   if (hours < 24) return `${hours}h ago`;
   const days = Math.floor(hours / 24);
   return days === 1 ? "1 day ago" : `${days} days ago`;
@@ -169,19 +187,47 @@ function withImgFallback(img) {
   });
 }
 
-/* Insert spaces into ddragon champion keys for display: "LeeSin" -> "Lee Sin" */
+/* Data Dragon keys whose display name isn't just the key with spaces added */
+const CHAMPION_DISPLAY_NAMES = {
+  AurelionSol: "Aurelion Sol",
+  Belveth: "Bel'Veth",
+  Chogath: "Cho'Gath",
+  DrMundo: "Dr. Mundo",
+  JarvanIV: "Jarvan IV",
+  Kaisa: "Kai'Sa",
+  Khazix: "Kha'Zix",
+  KogMaw: "Kog'Maw",
+  KSante: "K'Sante",
+  Leblanc: "LeBlanc",
+  MonkeyKing: "Wukong",
+  Nunu: "Nunu & Willump",
+  RekSai: "Rek'Sai",
+  Renata: "Renata Glasc",
+  Velkoz: "Vel'Koz",
+};
+
+/* "LeeSin" -> "Lee Sin", "MonkeyKing" -> "Wukong" */
 function champDisplayName(champ) {
-  return champ.replace(/([a-z])([A-Z])/g, "$1 $2");
+  return CHAMPION_DISPLAY_NAMES[champ] || champ.replace(/([a-z])([A-Z])/g, "$1 $2");
 }
 
 function showError(msg) {
   const box = $("error-box");
-  box.textContent = msg;
+  // Keep earlier messages so a profile error isn't hidden by a match error.
+  box.textContent = box.hidden || !box.textContent ? msg : `${box.textContent}\n${msg}`;
   box.hidden = false;
 }
 
+function clearSkeleton() {
+  $("match-list").innerHTML = "";
+}
+
 function renderProfile(p) {
-  if (p.error) return showError(p.error);
+  if (!p || p.error) {
+    $("summoner-name").textContent = "Profile unavailable";
+    return showError((p && p.error) || "Profile unavailable");
+  }
+  document.title = `${p.gameName} #${p.tagLine} · Rift Recap`;
   withImgFallback($("summoner-icon"));
   $("summoner-icon").src = profileIconUrl(p.profileIconId);
   $("summoner-name").innerHTML =
@@ -249,7 +295,7 @@ function matchCard(m) {
 function renderMatches(matches) {
   const list = $("match-list");
   list.innerHTML = "";
-  if (matches.error) return showError(matches.error);
+  if (!Array.isArray(matches)) return showError((matches && matches.error) || "Could not load matches");
   if (!matches.length) {
     list.innerHTML = '<p class="match-sub">No recent games found.</p>';
     return;
@@ -257,21 +303,41 @@ function renderMatches(matches) {
   matches.forEach((m) => list.appendChild(matchCard(m)));
 }
 
-async function init() {
+async function getJson(url) {
+  const res = await fetch(url);
   try {
-    const config = await (await fetch("/api/config")).json();
+    return await res.json();
+  } catch (_) {
+    throw new Error(`${url} returned ${res.status} ${res.statusText || ""}`.trim());
+  }
+}
+
+async function init() {
+  // Kick off all three requests at once; config only gates rendering.
+  const configReq = getJson("/api/config");
+  const profileReq = getJson("/api/profile");
+  const matchesReq = getJson("/api/matches");
+  // Failures are handled via allSettled below; swallow them here so a fast
+  // rejection while config is still loading isn't reported as unhandled.
+  [profileReq, matchesReq].forEach((req) => req.catch(() => {}));
+
+  try {
+    const config = await configReq;
     state.ddragonVersion = config.ddragonVersion || state.ddragonVersion;
     initMusic(config.musicUrl);
-
-    const [profile, matches] = await Promise.all([
-      (await fetch("/api/profile")).json(),
-      (await fetch("/api/matches")).json(),
-    ]);
-    renderProfile(profile);
-    renderMatches(matches);
   } catch (err) {
-    showError(`Failed to load data: ${err.message}`);
+    // Config is non-essential: fall back to the default Data Dragon version
+    // and the bundled ambient loop.
+    initMusic("");
   }
+
+  const [profile, matches] = await Promise.allSettled([profileReq, matchesReq]);
+
+  if (profile.status === "fulfilled") renderProfile(profile.value);
+  else renderProfile({ error: `Failed to load profile: ${profile.reason.message}` });
+
+  if (matches.status === "fulfilled") renderMatches(matches.value);
+  else { clearSkeleton(); showError(`Failed to load matches: ${matches.reason.message}`); }
 }
 
 init();
