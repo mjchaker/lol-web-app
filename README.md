@@ -33,8 +33,7 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 
-cp .env.example .env        # then edit .env
-export $(grep -v '^#' .env | xargs)
+cp .env.example .env        # then edit .env — it is loaded automatically
 
 python app.py               # http://localhost:5000
 ```
@@ -46,8 +45,7 @@ On later runs you only need `source .venv/bin/activate` before `python app.py`.
 ```bash
 pip install -r requirements.txt
 
-cp .env.example .env        # then edit .env
-export $(grep -v '^#' .env | xargs)
+cp .env.example .env        # then edit .env — it is loaded automatically
 
 python app.py               # http://localhost:5000
 ```
@@ -66,6 +64,11 @@ No `RIOT_API_KEY`? The app runs in **demo mode** with sample data so you can
 try the UI right away.
 
 ## Configuration
+
+Settings are read from environment variables. A `.env` file next to `app.py`
+is loaded automatically on start-up (variables already set in the environment
+take precedence), so values with spaces such as `RIOT_ID=Hide on bush#KR1`
+work without any shell quoting.
 
 | Variable        | Description                                     | Default        |
 | --------------- | ----------------------------------------------- | -------------- |

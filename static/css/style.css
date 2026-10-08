@@ -328,6 +328,7 @@ html:not([data-theme="light"]) .icon-sun { display: none; }
   background: var(--loss-bg);
   color: var(--loss);
   font-size: 0.9rem;
+  white-space: pre-line;
 }
 
 .footer {
